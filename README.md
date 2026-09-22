@@ -10,7 +10,7 @@
 
 启动顺序：**数据库 / Redis → tmx 后端 → tmx-vue 前端**。以下命令以 Windows PowerShell 为例。
 
-Before starting, copy `.env.development.example` to `.env.development` and `.env.production.example` to `.env.production`. The examples disable API encryption; generate and configure matching frontend/backend keys if you enable it. Local `.env.*` files are excluded from Git.
+Before starting, copy `.env.development.example` to `.env.development` and `.env.production.example` to `.env.production`. The examples disable API encryption; generate and configure matching frontend/backend keys if you enable it. Check committed environment settings before use outside development.
 
 ### 1. 检查 Node 与包管理器
 

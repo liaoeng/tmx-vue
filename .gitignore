@@ -28,9 +28,6 @@ yarn.lock
 auto-imports.d.ts
 components.d.ts
 
-# Local environment configuration (copy from .env.*.example)
-.env.*
-!.env.*.example
 
 **/auto-imports.d.ts
 **/components.d.ts
