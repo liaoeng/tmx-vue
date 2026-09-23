@@ -9,27 +9,31 @@ import { getToken } from '@/utils/auth';
 import { decryptBase64, decryptWithAes, encryptBase64, encryptWithAes, generateAesKey } from '@/utils/crypto';
 import { errorCode } from '@/utils/errorCode';
 import { decrypt, encrypt } from '@/utils/jsencrypt';
-import { blobValidate, tansParams } from '@/utils/tmx';
 import { saveBlob } from '@/utils/save';
+import { isNonJsonResponse, tansParams } from '@/utils/tmx';
 
 /** axios 1.13 + TS6：默认导出在类型上会被解析为不可调用的 export= 形态 */
 const axios = axiosModule as any;
 
 const encryptHeader = 'encrypt-key';
+const repeatSubmitIntervalMs = 500;
 let downloadLoadingInstance: LoadingInstance | undefined;
-// 是否显示重新登录
+// 并发请求只显示一个会话过期确认框。
 export const isRelogin = { show: false };
 
+/** 标记已向用户展示的业务错误，避免页面层重复弹出相同提示。 */
 function createHandledError(message: string) {
   const error = new Error(message) as Error & { isHandled?: boolean };
   error.isHandled = true;
   return error;
 }
 
+/** 判断请求错误是否已经由全局响应拦截器提示。 */
 export function isHandledRequestError(error: unknown) {
   return Boolean((error as { isHandled?: boolean } | undefined)?.isHandled);
 }
 
+/** 将常见网络错误转为可读提示，保留后端未覆盖的原始消息。 */
 function normalizeErrorMessage(message?: string) {
   if (!message) {
     return undefined;
@@ -46,6 +50,7 @@ function normalizeErrorMessage(message?: string) {
   return message;
 }
 
+/** 从普通响应或下载接口返回的 Blob 中提取后端错误消息。 */
 async function parseResponseErrorData(data: unknown): Promise<string | undefined> {
   if (!data) {
     return undefined;
@@ -79,6 +84,7 @@ async function parseResponseErrorData(data: unknown): Promise<string | undefined
   return undefined;
 }
 
+/** 优先使用后端消息；没有响应体时再解释网络或超时错误。 */
 export async function extractErrorMessage(error: any): Promise<string | undefined> {
   const responseMessage = await parseResponseErrorData(error?.response?.data);
   if (responseMessage) {
@@ -87,6 +93,7 @@ export async function extractErrorMessage(error: any): Promise<string | undefine
   return normalizeErrorMessage(error?.message);
 }
 
+/** 供不经过 service 拦截器的下载请求显式携带认证与客户端标识。 */
 export const globalHeaders = () => {
   return {
     Authorization: 'Bearer ' + getToken(),
@@ -112,16 +119,15 @@ service.interceptors.request.use(
     // 对应国际化资源文件后缀
     config.headers['Content-Language'] = getLanguage();
 
-    const isToken = config.headers?.isToken === false;
-    // 是否需要防止数据重复提交
-    const isRepeatSubmit = config.headers?.repeatSubmit === false;
-    // 是否需要加密
-    const isEncrypt = config.headers?.isEncrypt === 'true';
+    // 这些请求头是接口级开关：false 表示跳过默认认证或重复提交保护。
+    const skipToken = config.headers?.isToken === false;
+    const skipRepeatSubmit = config.headers?.repeatSubmit === false;
+    const encryptRequest = config.headers?.isEncrypt === 'true';
 
-    if (getToken() && !isToken) {
-      config.headers['Authorization'] = 'Bearer ' + getToken(); // 让每个请求携带自定义token 请根据实际情况自行修改
+    if (getToken() && !skipToken) {
+      config.headers['Authorization'] = 'Bearer ' + getToken();
     }
-    // get请求映射params参数
+    // 将 GET 参数写入 URL，并清空 params 以避免 axios 再次追加。
     if (config.method === 'get' && config.params) {
       let url = config.url + '?' + tansParams(config.params);
       url = url.slice(0, -1);
@@ -129,7 +135,7 @@ service.interceptors.request.use(
       config.url = url;
     }
 
-    if (!isRepeatSubmit && (config.method === 'post' || config.method === 'put')) {
+    if (!skipRepeatSubmit && (config.method === 'post' || config.method === 'put')) {
       const requestObj = {
         url: config.url,
         data: typeof config.data === 'object' ? JSON.stringify(config.data) : config.data,
@@ -139,13 +145,11 @@ service.interceptors.request.use(
       if (sessionObj === undefined || sessionObj === null || sessionObj === '') {
         cache.session.setJSON('sessionObj', requestObj);
       } else {
-        const s_url = sessionObj.url; // 请求地址
-        const s_data = sessionObj.data; // 请求数据
-        const s_time = sessionObj.time; // 请求时间
-        const interval = 500; // 间隔时间(ms)，小于此时间视为重复提交
-        if (s_data === requestObj.data && requestObj.time - s_time < interval && s_url === requestObj.url) {
+        // 仅拦截同一地址、同一请求体且间隔不足 500ms 的重复提交。
+        const sameRequest = sessionObj.url === requestObj.url && sessionObj.data === requestObj.data;
+        if (sameRequest && requestObj.time - sessionObj.time < repeatSubmitIntervalMs) {
           const message = '数据正在处理，请勿重复提交';
-          console.warn(`[${s_url}]: ` + message);
+          console.warn(`[${sessionObj.url}]: ` + message);
           return Promise.reject(new Error(message));
         } else {
           cache.session.setJSON('sessionObj', requestObj);
@@ -154,7 +158,7 @@ service.interceptors.request.use(
     }
     if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
       // 当开启参数加密
-      if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+      if (encryptRequest && (config.method === 'post' || config.method === 'put')) {
         // 生成一个 AES 密钥
         const aesKey = generateAesKey();
         config.headers[encryptHeader] = encrypt(encryptBase64(aesKey));
@@ -164,7 +168,7 @@ service.interceptors.request.use(
             : encryptWithAes(config.data, aesKey);
       }
     }
-    // FormData数据去请求头Content-Type
+    // 让浏览器为 FormData 自动生成包含 boundary 的 Content-Type。
     if (config.data instanceof FormData) {
       delete config.headers['Content-Type'];
     }
@@ -179,12 +183,11 @@ service.interceptors.request.use(
 service.interceptors.response.use(
   (res: any) => {
     if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
-      // 加密后的 AES 秘钥
+      // 后端使用前端公钥加密本次响应的 AES 密钥，浏览器据此解密响应体。
       const keyStr = res.headers[encryptHeader];
-      // 加密
       if (keyStr != null && keyStr != '') {
         const data = res.data;
-        // 请求体 AES 解密
+        // 响应体 AES 解密。
         const base64Str = decrypt(keyStr);
         // base64 解码 得到请求头的 AES 秘钥
         const aesKey = decryptBase64(base64Str.toString());
@@ -203,37 +206,30 @@ service.interceptors.response.use(
       return res.data;
     }
     if (code === 401) {
-      // prettier-ignore
       if (!isRelogin.show) {
-				isRelogin.show = true;
-				ElMessageBox.confirm(
-					"登录状态已过期，您可以继续留在该页面，或者重新登录",
-					"系统提示",
-					{
-						confirmButtonText: "重新登录",
-						cancelButtonText: "取消",
-						type: "warning",
-					},
-				)
-					.then(() => {
-						isRelogin.show = false;
-						useUserStore()
-							.logout()
-							.then(() => {
-								router.replace({
-									path: "/login",
-									query: {
-										redirect: encodeURIComponent(
-											router.currentRoute.value.fullPath || "/",
-										),
-									},
-								});
-							});
-					})
-					.catch(() => {
-						isRelogin.show = false;
-					});
-			}
+        isRelogin.show = true;
+        ElMessageBox.confirm('登录状态已过期，您可以继续留在该页面，或者重新登录', '系统提示', {
+          confirmButtonText: '重新登录',
+          cancelButtonText: '取消',
+          type: 'warning'
+        })
+          .then(() => {
+            isRelogin.show = false;
+            useUserStore()
+              .logout()
+              .then(() => {
+                router.replace({
+                  path: '/login',
+                  query: {
+                    redirect: encodeURIComponent(router.currentRoute.value.fullPath || '/')
+                  }
+                });
+              });
+          })
+          .catch(() => {
+            isRelogin.show = false;
+          });
+      }
       return Promise.reject('无效的会话，或者会话已过期，请重新登录。');
     } else if (code === HttpStatus.SERVER_ERROR) {
       ElMessage({ message: msg, type: 'error' });
@@ -255,42 +251,40 @@ service.interceptors.response.use(
     return Promise.reject(error);
   }
 );
-// 通用下载方法
+/** 下载表单导出文件；后端若返回错误 JSON，则显示错误而不保存文件。 */
 export function download(url: string, params: any, fileName: string) {
   downloadLoadingInstance = ElLoading.service({
     text: '正在下载数据，请稍候',
     background: 'rgba(0, 0, 0, 0.7)'
   });
-  // prettier-ignore
   return service
-		.post(url, params, {
-			transformRequest: [
-				(params: any) => {
-					return tansParams(params);
-				},
-			],
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			responseType: "blob",
-		})
-		.then(async (resp: any) => {
-			const isLogin = blobValidate(resp);
-			if (isLogin) {
-				const blob = new Blob([resp]);
-				saveBlob(blob, fileName);
-			} else {
-				const blob = new Blob([resp]);
-				const resText = await blob.text();
-				const rspObj = JSON.parse(resText);
-				const errMsg =
-					errorCode[rspObj.code] || rspObj.msg || errorCode["default"];
-				ElMessage.error(errMsg);
-			}
-			downloadLoadingInstance?.close();
-		})
-		.catch((r: any) => {
-			console.error(r);
-			downloadLoadingInstance?.close();
-		});
+    .post(url, params, {
+      transformRequest: [
+        (params: any) => {
+          return tansParams(params);
+        }
+      ],
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      responseType: 'blob'
+    })
+    .then(async (resp: any) => {
+      const isFileResponse = isNonJsonResponse(resp);
+      if (isFileResponse) {
+        const blob = new Blob([resp]);
+        saveBlob(blob, fileName);
+      } else {
+        const blob = new Blob([resp]);
+        const resText = await blob.text();
+        const rspObj = JSON.parse(resText);
+        const errMsg = errorCode[rspObj.code] || rspObj.msg || errorCode['default'];
+        ElMessage.error(errMsg);
+      }
+      downloadLoadingInstance?.close();
+    })
+    .catch((r: any) => {
+      console.error(r);
+      downloadLoadingInstance?.close();
+    });
 }
 // 导出 axios 实例
 export default service;

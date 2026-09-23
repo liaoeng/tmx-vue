@@ -227,8 +227,8 @@ export const getNormalPath = (p: string): string => {
   return res;
 };
 
-// 验证是否为blob格式
-export const blobValidate = (data: any) => {
+/** 根据 MIME 类型判断下载接口返回的是否为非 JSON 内容。 */
+export const isNonJsonResponse = (data: any) => {
   return data.type !== 'application/json';
 };
 

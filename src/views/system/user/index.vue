@@ -614,21 +614,22 @@ const getDeptTree = async () => {
 
 /** 过滤禁用的部门，并返回独立的新树，避免污染左侧完整部门树 */
 const filterDisabledDept = (deptList: DeptTreeVO[]): DeptTreeVO[] => {
-  return deptList.reduce<DeptTreeVO[]>((result, dept) => {
+  const enabledDepartments: DeptTreeVO[] = [];
+  for (const dept of deptList) {
     if (dept.disabled) {
-      return result;
+      continue;
     }
-    result.push({
+    enabledDepartments.push({
       ...dept,
       children: dept.children?.length ? filterDisabledDept(dept.children) : []
     });
-    return result;
-  }, []);
+  }
+  return enabledDepartments;
 };
 
 /** 节点单击事件 */
-const handleNodeClick = (data: DeptVO) => {
-  queryParams.value.deptId = data.id;
+const handleNodeClick = (dept: DeptVO) => {
+  queryParams.value.deptId = dept.id;
   handleQuery();
 };
 
@@ -851,6 +852,7 @@ onMounted(() => {
   });
 });
 
+/** 切换部门后重新加载可选岗位，并清空原有岗位选择。 */
 async function handleDeptChange(value: number | string) {
   const response = await optionselect(value);
   postOptions.value = response.data;
